@@ -60,32 +60,43 @@ fi
 echo
 
 # ============================================
-# 4. Установка пакетов (БЕЗ v2ray из репозитория)
+# 4. Установка пакетов
 # ============================================
-echo "=== Устанавливаю базовые пакеты ==="
+echo "=== Устанавливаю пакеты (Python, Nginx, PostgreSQL, UFW, curl, unzip, jq) ==="
 apt update
 DEBIAN_FRONTEND=noninteractive apt install -y \
   python3 python3-venv python3-pip \
   nginx certbot python3-certbot-nginx \
   postgresql postgresql-contrib \
-  ufw jq curl
+  ufw jq curl unzip
+
+# Если установлен пакетный v2ray — удалим его, чтобы не мешал FHS-версии
+if dpkg -l | grep -q '^ii  v2ray '; then
+  echo "=== Обнаружен пакет v2ray из репозитория — удаляю ==="
+  apt remove --purge -y v2ray || true
+  rm -rf /etc/v2ray || true
+fi
 
 # ============================================
-# 4.1 Установка V2Ray v5.41.0 через официальный скрипт
+# 5. Установка V2Ray через FHS installer
 # ============================================
-echo "=== Устанавливаю V2Ray v5.41.0 (fhs-install-v2ray) ==="
+echo "=== Устанавливаю V2Ray через FHS installer (v2fly) ==="
+curl -fsSL https://raw.githubusercontent.com/v2fly/fhs-install-v2ray/master/install-release.sh -o /tmp/install_v2ray.sh
+bash /tmp/install_v2ray.sh
+rm -f /tmp/install_v2ray.sh
 
-bash <(curl -L https://raw.githubusercontent.com/v2fly/fhs-install-v2ray/master/install-release.sh) \
-  --version v5.41.0
+# Директории V2Ray по FHS
+V2RAY_ETC="/usr/local/etc/v2ray"
+V2RAY_CONF_DIR="$V2RAY_ETC/conf"
+mkdir -p "$V2RAY_CONF_DIR"
 
-# на всякий случай убеждаемся, что директории конфигов существуют
-mkdir -p /usr/local/etc/v2ray/conf
+# Логи V2Ray
 mkdir -p /var/log/v2ray
-touch /var/log/v2ray/access.log /var/log/v2ray/error.log
-chmod 666 /var/log/v2ray/access.log /var/log/v2ray/error.log
+chown nobody:nogroup /var/log/v2ray || true
+chmod 755 /var/log/v2ray || true
 
 # ============================================
-# 5. Настройка PostgreSQL
+# 6. Настройка PostgreSQL
 # ============================================
 echo "=== Настраиваю PostgreSQL (пользователь v2ray_user, база v2ray_db) ==="
 
@@ -124,7 +135,7 @@ sudo -u postgres psql -d v2ray_db -c "ALTER TABLE clients OWNER TO v2ray_user;" 
 sudo -u postgres psql -d v2ray_db -c "ALTER SEQUENCE clients_id_seq OWNER TO v2ray_user;" || true
 
 # ============================================
-# 6. Развёртывание API в /opt/v2api
+# 7. Развёртывание API в /opt/v2api
 # ============================================
 echo "=== Разворачиваю API в $APP_DIR ==="
 
@@ -142,7 +153,7 @@ pip install flask flask-cors psycopg2-binary gunicorn
 deactivate
 
 # ============================================
-# 7. Пишем app.py (только VMess, clients.json в /usr/local/etc/v2ray/conf)
+# 8. Пишем app.py (VMess + единый clients.json через configDir)
 # ============================================
 cat > "$APP_DIR/app.py" <<EOF
 import json
@@ -170,7 +181,7 @@ DB_CONFIG = {
 # Лимит тела запроса (например 1 МБ), чтобы не убить воркеры огромным JSON
 app.config["MAX_CONTENT_LENGTH"] = 1 * 1024 * 1024  # 1 MB
 
-# Путь к конфигу V2Ray с клиентами (вариант A, отдельный clients.json)
+# Путь к доп. конфигу V2Ray с клиентами (configDir)
 V2RAY_CLIENTS_FILE = "/usr/local/etc/v2ray/conf/clients.json"
 
 # Флаг-файл, который будет отслеживать systemd timer/service
@@ -198,6 +209,7 @@ def mark_v2ray_reload_needed():
     Этим флагом занимается отдельный systemd-сервис/таймер.
     """
     try:
+        os.makedirs(os.path.dirname(V2RAY_RELOAD_FLAG), exist_ok=True)
         with open(V2RAY_RELOAD_FLAG, "w") as f:
             f.write("reload_requested\\n")
     except Exception as e:
@@ -240,12 +252,26 @@ def api_options(path):
 
 # -------------------------------------------------------
 # Обновление V2Ray (/usr/local/etc/v2ray/conf/clients.json)
+# через configDir + merge по tag = "vmess_ws"
 # -------------------------------------------------------
 def update_v2ray_config():
     """
     Читает активных клиентов из БД, перезаписывает clients.json
     и ставит флаг для последующего перезапуска/перечитывания V2Ray
     через systemd timer/service.
+    Формат файла:
+    {
+      "inbounds": [
+        {
+          "tag": "vmess_ws",
+          "settings": {
+            "clients": [...]
+          }
+        }
+      ]
+    }
+    Основной config.json уже содержит inbound vmess_ws (port, path и т.д.).
+    Здесь мы обновляем только список clients.
     """
     with get_db_connection() as conn:
         with conn.cursor() as cur:
@@ -254,17 +280,8 @@ def update_v2ray_config():
 
     inbound = {
         "tag": "vmess_ws",
-        "listen": "127.0.0.1",
-        "port": 10085,
-        "protocol": "vmess",
         "settings": {
             "clients": []
-        },
-        "streamSettings": {
-            "network": "ws",
-            "wsSettings": {
-                "path": "/vmess"
-            }
         }
     }
 
@@ -281,10 +298,11 @@ def update_v2ray_config():
     full = {"inbounds": [inbound]}
 
     try:
+        os.makedirs(os.path.dirname(V2RAY_CLIENTS_FILE), exist_ok=True)
         with open(V2RAY_CLIENTS_FILE, "w") as f:
             json.dump(full, f, indent=4)
     except Exception as e:
-        print(f"Failed to write V2Ray config: {e}")
+        print(f"Failed to write V2Ray clients config: {e}")
 
     mark_v2ray_reload_needed()
 
@@ -417,7 +435,7 @@ chown v2api:v2api "$APP_DIR/app.py"
 chmod 755 "$APP_DIR/app.py"
 
 # ============================================
-# 7.1 Пишем /opt/v2api/add_vmess_user.sh
+# 9. Пишем /opt/v2api/add_vmess_user.sh
 # ============================================
 cat > "$APP_DIR/add_vmess_user.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -462,7 +480,7 @@ fi
 
 echo "UUID: $UUID"
 
-# ===== VMess JSON для клиентов =====
+# ===== VMess JSON для клиентов (AEAD, alterId=0) =====
 VMESS_JSON=$(cat <<JSON
 {
   "v": "2",
@@ -501,12 +519,12 @@ chown v2api:v2api "$APP_DIR/add_vmess_user.sh"
 chmod 755 "$APP_DIR/add_vmess_user.sh"
 
 # ============================================
-# 8. Настройка V2Ray (config.json + clients.json, Вариант A)
+# 10. Настройка V2Ray (основной config.json + configDir)
 # ============================================
-echo "=== Настраиваю V2Ray конфиги (/usr/local/etc/v2ray) ==="
+echo "=== Настраиваю V2Ray (FHS) ==="
 
-# основной конфиг V2Ray, который тянет дополнительные конфиги из confdir
-cat > /usr/local/etc/v2ray/config.json <<'EOF'
+# Основной конфиг V2Ray — единый, без clients внутри, но с configDir
+cat > "$V2RAY_ETC/config.json" <<'EOF'
 {
   "log": {
     "access": "/var/log/v2ray/access.log",
@@ -558,6 +576,21 @@ cat > /usr/local/etc/v2ray/config.json <<'EOF'
 
   "inbounds": [
     {
+      "tag": "vmess_ws",
+      "listen": "127.0.0.1",
+      "port": 10085,
+      "protocol": "vmess",
+      "settings": {
+        "clients": []
+      },
+      "streamSettings": {
+        "network": "ws",
+        "wsSettings": {
+          "path": "/vmess"
+        }
+      }
+    },
+    {
       "tag": "api",
       "listen": "127.0.0.1",
       "port": 52018,
@@ -579,41 +612,31 @@ cat > /usr/local/etc/v2ray/config.json <<'EOF'
     }
   ],
 
-  "confdir": "/usr/local/etc/v2ray/conf"
+  "configDir": "/usr/local/etc/v2ray/conf"
 }
 EOF
 
-# начальный clients.json — пустой список VMess-клиентов
-cat > /usr/local/etc/v2ray/conf/clients.json <<'EOF'
+# Начальный clients.json — пустой список VMess-клиентов, только tag + settings
+cat > "$V2RAY_CONF_DIR/clients.json" <<'EOF'
 {
   "inbounds": [
     {
       "tag": "vmess_ws",
-      "listen": "127.0.0.1",
-      "port": 10085,
-      "protocol": "vmess",
       "settings": {
         "clients": []
-      },
-      "streamSettings": {
-        "network": "ws",
-        "wsSettings": {
-          "path": "/vmess"
-        }
       }
     }
   ]
 }
 EOF
 
-chown root:v2api /usr/local/etc/v2ray/conf/clients.json
-chmod 664 /usr/local/etc/v2ray/conf/clients.json
+chown v2api:v2api "$V2RAY_CONF_DIR/clients.json"
+chmod 644 "$V2RAY_CONF_DIR/clients.json"
 
-systemctl enable v2ray >/dev/null 2>&1 || true
-systemctl restart v2ray
+systemctl enable --now v2ray
 
 # ============================================
-# 9. systemd сервисы: myapi + v2ray-reload
+# 11. systemd сервисы: myapi + v2ray-reload
 # ============================================
 echo "=== Настраиваю systemd сервисы ==="
 
@@ -680,7 +703,7 @@ systemctl enable --now myapi.service
 systemctl enable --now v2ray-reload.timer
 
 # ============================================
-# 10. Nginx: HTTP-конфиг, затем SSL через certbot
+# 12. Nginx: HTTP-конфиг, затем SSL через certbot
 # ============================================
 echo "=== Настраиваю Nginx и SSL (Certbot) ==="
 
@@ -734,18 +757,19 @@ nginx -t
 systemctl reload nginx
 
 # ============================================
-# 11. UFW (фаервол)
+# 13. UFW (фаервол)
 # ============================================
 echo "=== Настраиваю UFW (фаервол) ==="
 
 ufw allow 22/tcp || true
 ufw allow 80/tcp || true
 ufw allow 443/tcp || true
-ufw allow 10085/tcp || true
+# 10085 слушает только 127.0.0.1 — в ufw не нужен, но на всякий случай:
+# ufw allow 10085/tcp || true
 ufw --force enable || true
 
 # ============================================
-# 12. Финальная информация
+# 14. Финальная информация
 # ============================================
 echo
 echo "============================================"
@@ -755,10 +779,10 @@ echo "Домен:          $DOMAIN"
 echo "API endpoint:   https://$DOMAIN/api/clients"
 echo "API токен:      $API_TOKEN"
 echo
-echo "Пример проверки API:"
+echo "Проверка API:"
 echo "  curl -H \"Authorization: Bearer $API_TOKEN\" https://$DOMAIN/api/clients"
 echo
-echo "VMess WS:"
+echo "VMess WS+TLS:"
 echo "  wss://$DOMAIN/vmess"
 echo "  порт: 443 (через HTTPS)"
 echo "  внутренний порт V2Ray: 10085 (127.0.0.1)"
