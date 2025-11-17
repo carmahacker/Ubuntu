@@ -128,7 +128,7 @@ pip install flask flask-cors psycopg2-binary gunicorn
 deactivate
 
 # ============================================
-# 7. Пишем app.py (только VMess)
+# 7. Пишем app.py (только VMess, правит /etc/v2ray/config.json целиком)
 # ============================================
 cat > "$APP_DIR/app.py" <<EOF
 import json
@@ -153,11 +153,11 @@ DB_CONFIG = {
     "host": "localhost",
 }
 
-# Лимит тела запроса (например 1 МБ), чтобы не убить воркеры огромным JSON
+# Лимит тела запроса (например 1 МБ)
 app.config["MAX_CONTENT_LENGTH"] = 1 * 1024 * 1024  # 1 MB
 
-# Путь к конфигу V2Ray с клиентами
-V2RAY_CLIENTS_FILE = "/etc/v2ray/conf/clients.json"
+# Путь к основному конфигу V2Ray
+V2RAY_CONFIG_FILE = "/etc/v2ray/config.json"
 
 # Флаг-файл, который будет отслеживать systemd timer/service
 V2RAY_RELOAD_FLAG = "/run/v2ray_reload.flag"
@@ -204,6 +204,131 @@ def tail_file(path: str, max_bytes: int) -> str:
     return data.decode(errors="ignore")
 
 
+def build_v2ray_config(clients_list):
+    """
+    Строит полный config.json для V2Ray на основе списка клиентов.
+    clients_list — список словарей {id, email}.
+    """
+    inbound_vmess = {
+        "tag": "vmess_ws",
+        "listen": "127.0.0.1",
+        "port": 10085,
+        "protocol": "vmess",
+        "settings": {
+            "clients": []
+        },
+        "streamSettings": {
+            "network": "ws",
+            "wsSettings": {
+                "path": "/vmess"
+            }
+        }
+    }
+
+    for client in clients_list:
+        inbound_vmess["settings"]["clients"].append(
+            {
+                "id": client["id"],
+                "alterId": 0,
+                "level": 0,
+                "email": client["email"],
+            }
+        )
+
+    config = {
+        "log": {
+            "loglevel": "none"
+        },
+        "api": {
+            "tag": "api",
+            "services": [
+                "HandlerService",
+                "LoggerService",
+                "StatsService"
+            ]
+        },
+        "stats": {},
+        "dns": {},
+        "policy": {
+            "levels": {
+                "0": {
+                    "handshake": 6,
+                    "connIdle": 240,
+                    "uplinkOnly": 1,
+                    "downlinkOnly": 4,
+                    "statsUserUplink": True,
+                    "statsUserDownlink": True
+                }
+            },
+            "system": {
+                "statsInboundUplink": True,
+                "statsInboundDownlink": True,
+                "statsOutboundUplink": True,
+                "statsOutboundDownlink": True
+            }
+        },
+        "routing": {
+            "domainStrategy": "AsIs",
+            "rules": [
+                {
+                    "type": "field",
+                    "inboundTag": ["api"],
+                    "outboundTag": "api"
+                }
+            ]
+        },
+        "inbounds": [
+            inbound_vmess,
+            {
+                "tag": "api",
+                "listen": "127.0.0.1",
+                "port": 52018,
+                "protocol": "dokodemo-door",
+                "settings": {
+                    "address": "127.0.0.1"
+                }
+            }
+        ],
+        "outbounds": [
+            {
+                "tag": "direct",
+                "protocol": "freedom"
+            },
+            {
+                "tag": "block",
+                "protocol": "blackhole"
+            }
+        ]
+    }
+
+    return config
+
+
+def update_v2ray_config():
+    """
+    Читает активных клиентов из БД, генерирует ПОЛНЫЙ /etc/v2ray/config.json
+    и ставит флаг для последующего рестарта V2Ray через systemd timer/service.
+    """
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT uuid, name FROM clients WHERE status = TRUE ORDER BY id;")
+            rows = cur.fetchall()
+
+    clients_list = []
+    for uid, name in rows:
+        clients_list.append({"id": uid, "email": name})
+
+    cfg = build_v2ray_config(clients_list)
+
+    try:
+        with open(V2RAY_CONFIG_FILE, "w") as f:
+            json.dump(cfg, f, indent=2)
+    except Exception as e:
+        print(f"Failed to write V2Ray config: {e}")
+
+    mark_v2ray_reload_needed()
+
+
 # -------------------------------------------------------
 # CORS / заголовки
 # -------------------------------------------------------
@@ -222,57 +347,6 @@ def api_options(path):
     resp.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type"
     resp.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
     return resp, 200
-
-
-# -------------------------------------------------------
-# Обновление V2Ray (/etc/v2ray/conf/clients.json)
-# -------------------------------------------------------
-def update_v2ray_config():
-    """
-    Читает активных клиентов из БД, перезаписывает clients.json
-    и ставит флаг для последующего перезапуска/перечитывания V2Ray
-    через systemd timer/service.
-    """
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT uuid, name FROM clients WHERE status = TRUE;")
-            active = cur.fetchall()
-
-    inbound = {
-        "tag": "vmess_ws",
-        "listen": "127.0.0.1",
-        "port": 10085,
-        "protocol": "vmess",
-        "settings": {
-            "clients": []
-        },
-        "streamSettings": {
-            "network": "ws",
-            "wsSettings": {
-                "path": "/vmess"
-            }
-        }
-    }
-
-    for uid, name in active:
-        inbound["settings"]["clients"].append(
-            {
-                "id": uid,
-                "alterId": 0,
-                "level": 0,
-                "email": name,
-            }
-        )
-
-    full = {"inbounds": [inbound]}
-
-    try:
-        with open(V2RAY_CLIENTS_FILE, "w") as f:
-            json.dump(full, f, indent=4)
-    except Exception as e:
-        print(f"Failed to write V2Ray config: {e}")
-
-    mark_v2ray_reload_needed()
 
 
 # -------------------------------------------------------
@@ -396,6 +470,7 @@ def get_logs():
 # Запуск в debug (локально)
 # -------------------------------------------------------
 if __name__ == "__main__":
+    # Локальный запуск (для отладки), в бою работает gunicorn
     app.run(host="0.0.0.0", port=8081)
 EOF
 
@@ -487,15 +562,16 @@ chown v2api:v2api "$APP_DIR/add_vmess_user.sh"
 chmod 755 "$APP_DIR/add_vmess_user.sh"
 
 # ============================================
-# 8. Настройка V2Ray (config.json + clients.json)
+# 8. Настройка V2Ray — один config.json
 # ============================================
 echo "=== Настраиваю V2Ray ==="
 
-mkdir -p /etc/v2ray/conf
+mkdir -p /etc/v2ray
 mkdir -p /var/log/v2ray
 touch /var/log/v2ray/access.log /var/log/v2ray/error.log
 chmod 666 /var/log/v2ray/access.log /var/log/v2ray/error.log
 
+# начальный config.json — без клиентов (clients: [])
 cat > /etc/v2ray/config.json <<'EOF'
 {
   "log": {
@@ -546,6 +622,21 @@ cat > /etc/v2ray/config.json <<'EOF'
 
   "inbounds": [
     {
+      "tag": "vmess_ws",
+      "listen": "127.0.0.1",
+      "port": 10085,
+      "protocol": "vmess",
+      "settings": {
+        "clients": []
+      },
+      "streamSettings": {
+        "network": "ws",
+        "wsSettings": {
+          "path": "/vmess"
+        }
+      }
+    },
+    {
       "tag": "api",
       "listen": "127.0.0.1",
       "port": 52018,
@@ -565,37 +656,11 @@ cat > /etc/v2ray/config.json <<'EOF'
       "tag": "block",
       "protocol": "blackhole"
     }
-  ],
-
-  "confdir": "/etc/v2ray/conf"
-}
-EOF
-
-# начальный clients.json — пустой список VMess-клиентов
-cat > /etc/v2ray/conf/clients.json <<'EOF'
-{
-  "inbounds": [
-    {
-      "tag": "vmess_ws",
-      "listen": "127.0.0.1",
-      "port": 10085,
-      "protocol": "vmess",
-      "settings": {
-        "clients": []
-      },
-      "streamSettings": {
-        "network": "ws",
-        "wsSettings": {
-          "path": "/vmess"
-        }
-      }
-    }
   ]
 }
 EOF
 
-chown root:v2api /etc/v2ray/conf/clients.json
-chmod 664 /etc/v2ray/conf/clients.json
+chmod 644 /etc/v2ray/config.json
 
 systemctl enable --now v2ray
 
