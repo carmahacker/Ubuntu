@@ -34,6 +34,10 @@ APP_DIR="/opt/v2api"
 mkdir -p "$APP_DIR"
 chown -R v2api:v2api "$APP_DIR"
 
+# /run/v2api для флага перезагрузки
+mkdir -p /run/v2api
+chown v2api:v2api /run/v2api || true
+
 # сохраняем домен для add_vmess_user.sh
 echo "$DOMAIN" > "$APP_DIR/domain"
 chown v2api:v2api "$APP_DIR/domain"
@@ -185,7 +189,7 @@ app.config["MAX_CONTENT_LENGTH"] = 1 * 1024 * 1024  # 1 MB
 V2RAY_CLIENTS_FILE = "/usr/local/etc/v2ray/conf/clients.json"
 
 # Флаг-файл, который будет отслеживать systemd timer/service
-V2RAY_RELOAD_FLAG = "/run/v2ray_reload.flag"
+V2RAY_RELOAD_FLAG = "/run/v2api/v2ray_reload.flag"
 
 # Сколько байт логов читаем с конца файла
 LOG_TAIL_BYTES = 50 * 1024  # 50 KB
@@ -465,7 +469,7 @@ NAME="$1"
 
 echo "Добавляю клиента '${NAME}' ..."
 
-RESP=$(curl -s -X POST "$API/clients" \
+RESP=$(curl -ks -X POST "$API/clients" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d "{\"name\":\"$NAME\"}")
@@ -505,12 +509,10 @@ VMESS_LINK="vmess://${VMESS_B64}"
 
 echo
 echo "========================================"
-echo "VMESS ссылка для подключения:"
-echo
+echo "VMESS ссылка:"
 echo "$VMESS_LINK"
-echo
 echo "========================================"
-echo "QR JSON (для v2rayNG / Nekobox / Qv2ray):"
+echo "QR JSON:"
 echo "$VMESS_JSON"
 echo "========================================"
 EOF
@@ -523,7 +525,6 @@ chmod 755 "$APP_DIR/add_vmess_user.sh"
 # ============================================
 echo "=== Настраиваю V2Ray (FHS) ==="
 
-# Основной конфиг V2Ray — единый, без clients внутри, но с configDir
 cat > "$V2RAY_ETC/config.json" <<'EOF'
 {
   "log": {
@@ -676,10 +677,10 @@ After=network.target v2ray.service
 [Service]
 Type=oneshot
 ExecStart=/bin/bash -c '\
-    if [ -f /run/v2ray_reload.flag ]; then \
+    if [ -f /run/v2api/v2ray_reload.flag ]; then \
          echo "[v2ray-reload] Flag found, restarting v2ray"; \
          systemctl restart v2ray; \
-         rm -f /run/v2ray_reload.flag; \
+         rm -f /run/v2api/v2ray_reload.flag; \
      else \
          echo "[v2ray-reload] No flag, nothing to do"; \
      fi'
@@ -750,7 +751,7 @@ rm -f /etc/nginx/sites-enabled/default || true
 nginx -t
 systemctl reload nginx
 
-# SSL
+# SSL через Let’s Encrypt (вариант A)
 certbot --nginx --non-interactive --agree-tos --register-unsafely-without-email -d "$DOMAIN" || true
 
 nginx -t
@@ -764,8 +765,6 @@ echo "=== Настраиваю UFW (фаервол) ==="
 ufw allow 22/tcp || true
 ufw allow 80/tcp || true
 ufw allow 443/tcp || true
-# 10085 слушает только 127.0.0.1 — в ufw не нужен, но на всякий случай:
-# ufw allow 10085/tcp || true
 ufw --force enable || true
 
 # ============================================
