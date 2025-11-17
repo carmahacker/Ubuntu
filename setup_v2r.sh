@@ -5,7 +5,9 @@ set -e
 # 0. Проверка прав
 # ============================================
 if [ "$EUID" -ne 0 ]; then
-  echo "Запустите скрипт от root (sudo -i; bash install.sh)"
+  echo "Запустите скрипт от root, например:"
+  echo "  sudo -i"
+  echo "  bash setup_v2r.sh"
   exit 1
 fi
 
@@ -31,6 +33,11 @@ fi
 APP_DIR="/opt/v2api"
 mkdir -p "$APP_DIR"
 chown -R v2api:v2api "$APP_DIR"
+
+# сохраняем домен для add_vmess_user.sh
+echo "$DOMAIN" > "$APP_DIR/domain"
+chown v2api:v2api "$APP_DIR/domain"
+chmod 644 "$APP_DIR/domain"
 
 # ============================================
 # 3. API_TOKEN: читаем из файла или генерируем
@@ -61,7 +68,7 @@ DEBIAN_FRONTEND=noninteractive apt install -y \
   python3 python3-venv python3-pip \
   nginx certbot python3-certbot-nginx \
   postgresql postgresql-contrib \
-  v2ray ufw
+  v2ray ufw jq
 
 # ============================================
 # 5. Настройка PostgreSQL
@@ -396,6 +403,90 @@ chown v2api:v2api "$APP_DIR/app.py"
 chmod 755 "$APP_DIR/app.py"
 
 # ============================================
+# 7.1 Пишем /opt/v2api/add_vmess_user.sh
+# ============================================
+cat > "$APP_DIR/add_vmess_user.sh" <<'EOF'
+#!/usr/bin/env bash
+set -e
+
+# ===== Настройки =====
+DOMAIN=$(cat /opt/v2api/domain 2>/dev/null)
+TOKEN=$(cat /opt/v2api/api_token 2>/dev/null)
+API="https://${DOMAIN}/api"
+
+if [ -z "$DOMAIN" ] || [ -z "$TOKEN" ]; then
+  echo "❌ Не найден файл /opt/v2api/domain или api_token"
+  exit 1
+fi
+
+if ! command -v jq >/dev/null 2>&1; then
+  echo "❌ Требуется jq (apt install -y jq)"
+  exit 1
+fi
+
+if [ -z "$1" ]; then
+  echo "Использование: $0 <username>"
+  exit 1
+fi
+
+NAME="$1"
+
+echo "Добавляю клиента '${NAME}' ..."
+
+RESP=$(curl -s -X POST "$API/clients" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{\"name\":\"$NAME\"}")
+
+UUID=$(echo "$RESP" | jq -r '.uuid')
+
+if [ "$UUID" = "null" ] || [ -z "$UUID" ]; then
+  echo "❌ Ошибка API:"
+  echo "$RESP"
+  exit 1
+fi
+
+echo "UUID: $UUID"
+
+# ===== VMess JSON для клиентов =====
+VMESS_JSON=$(cat <<JSON
+{
+  "v": "2",
+  "ps": "$NAME",
+  "add": "$DOMAIN",
+  "port": "443",
+  "id": "$UUID",
+  "aid": "0",
+  "scy": "auto",
+  "net": "ws",
+  "type": "",
+  "host": "$DOMAIN",
+  "path": "/vmess",
+  "tls": "tls"
+}
+JSON
+)
+
+# ===== Base64 кодирование =====
+VMESS_B64=$(echo -n "$VMESS_JSON" | base64 -w0)
+VMESS_LINK="vmess://${VMESS_B64}"
+
+echo
+echo "========================================"
+echo "VMESS ссылка для подключения:"
+echo
+echo "$VMESS_LINK"
+echo
+echo "========================================"
+echo "QR JSON (для v2rayNG / Nekobox / Qv2ray):"
+echo "$VMESS_JSON"
+echo "========================================"
+EOF
+
+chown v2api:v2api "$APP_DIR/add_vmess_user.sh"
+chmod 755 "$APP_DIR/add_vmess_user.sh"
+
+# ============================================
 # 8. Настройка V2Ray (config.json + clients.json)
 # ============================================
 echo "=== Настраиваю V2Ray ==="
@@ -408,9 +499,7 @@ chmod 666 /var/log/v2ray/access.log /var/log/v2ray/error.log
 cat > /etc/v2ray/config.json <<'EOF'
 {
   "log": {
-    "access": "/var/log/v2ray/access.log",
-    "error": "/var/log/v2ray/error.log",
-    "loglevel": "warning"
+    "loglevel": "none"
   },
 
   "api": {
@@ -612,7 +701,7 @@ server {
         proxy_set_header Host \$host;
     }
 
-    # редирект всего остального на HTTPS (опционально можно убрать)
+    # редирект всего остального на HTTPS
     location / {
         return 301 https://\$host\$request_uri;
     }
@@ -660,6 +749,9 @@ echo "VMess WS:"
 echo "  wss://$DOMAIN/vmess"
 echo "  порт: 443 (через HTTPS)"
 echo "  внутренний порт V2Ray: 10085"
+echo
+echo "Добавление пользователя и vmess:// ссылки:"
+echo "  /opt/v2api/add_vmess_user.sh myuser"
 echo
 echo "Логи сервисов:"
 echo "  journalctl -u myapi -n 50"
