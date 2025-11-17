@@ -52,7 +52,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/carmahacker/Ubuntu/main/setu
 ```bash
 cd /home/user
 wget https://raw.githubusercontent.com/carmahacker/Ubuntu/main/add_vmess_user.sh
-./add_vmess_user.sh my_new_user
+bash ./add_vmess_user.sh my_new_user
 ```
 
 Вы получите:
