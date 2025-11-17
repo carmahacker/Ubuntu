@@ -50,7 +50,9 @@ bash <(curl -fsSL https://raw.githubusercontent.com/carmahacker/Ubuntu/main/setu
 
 3️⃣ Добавить пользователя и получить VMess
 ```bash
-/opt/v2api/add_vmess_user.sh myuser
+cd /home/user
+wget https://raw.githubusercontent.com/carmahacker/Ubuntu/main/add_vmess_user.sh
+./add_vmess_user.sh my_new_user
 ```
 
 Вы получите:
