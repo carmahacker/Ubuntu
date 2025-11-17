@@ -11,7 +11,7 @@ if [ "$EUID" -ne 0 ]; then
   exit 1
 fi
 
-echo "=== Установка V2Ray VMess + API + PostgreSQL + Nginx ==="
+echo "=== Установка V2Ray VMess + API + PostgreSQL + Nginx (FHS) ==="
 
 # ============================================
 # 1. Ввод доменного имени
@@ -33,10 +33,6 @@ fi
 APP_DIR="/opt/v2api"
 mkdir -p "$APP_DIR"
 chown -R v2api:v2api "$APP_DIR"
-
-# /run/v2api для флага перезагрузки
-mkdir -p /run/v2api
-chown v2api:v2api /run/v2api || true
 
 # сохраняем домен для add_vmess_user.sh
 echo "$DOMAIN" > "$APP_DIR/domain"
@@ -189,7 +185,7 @@ app.config["MAX_CONTENT_LENGTH"] = 1 * 1024 * 1024  # 1 MB
 V2RAY_CLIENTS_FILE = "/usr/local/etc/v2ray/conf/clients.json"
 
 # Флаг-файл, который будет отслеживать systemd timer/service
-V2RAY_RELOAD_FLAG = "/run/v2api/v2ray_reload.flag"
+V2RAY_RELOAD_FLAG = "/run/v2ray_reload.flag"
 
 # Сколько байт логов читаем с конца файла
 LOG_TAIL_BYTES = 50 * 1024  # 50 KB
@@ -263,6 +259,7 @@ def update_v2ray_config():
     Читает активных клиентов из БД, перезаписывает clients.json
     и ставит флаг для последующего перезапуска/перечитывания V2Ray
     через systemd timer/service.
+
     Формат файла:
     {
       "inbounds": [
@@ -274,8 +271,10 @@ def update_v2ray_config():
         }
       ]
     }
-    Основной config.json уже содержит inbound vmess_ws (port, path и т.д.).
-    Здесь мы обновляем только список clients.
+
+    Основной config.json уже содержит inbound vmess_ws
+    (listen, port, streamSettings, path и т.д.).
+    Здесь мы обновляем только список clients по тегу.
     """
     with get_db_connection() as conn:
         with conn.cursor() as cur:
@@ -439,7 +438,7 @@ chown v2api:v2api "$APP_DIR/app.py"
 chmod 755 "$APP_DIR/app.py"
 
 # ============================================
-# 9. Пишем /opt/v2api/add_vmess_user.sh
+# 9. /opt/v2api/add_vmess_user.sh
 # ============================================
 cat > "$APP_DIR/add_vmess_user.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -469,7 +468,7 @@ NAME="$1"
 
 echo "Добавляю клиента '${NAME}' ..."
 
-RESP=$(curl -ks -X POST "$API/clients" \
+RESP=$(curl -s -X POST "$API/clients" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d "{\"name\":\"$NAME\"}")
@@ -509,10 +508,12 @@ VMESS_LINK="vmess://${VMESS_B64}"
 
 echo
 echo "========================================"
-echo "VMESS ссылка:"
+echo "VMESS ссылка для подключения:"
+echo
 echo "$VMESS_LINK"
+echo
 echo "========================================"
-echo "QR JSON:"
+echo "QR JSON (для v2rayNG / Nekobox / Qv2ray):"
 echo "$VMESS_JSON"
 echo "========================================"
 EOF
@@ -677,10 +678,10 @@ After=network.target v2ray.service
 [Service]
 Type=oneshot
 ExecStart=/bin/bash -c '\
-    if [ -f /run/v2api/v2ray_reload.flag ]; then \
+    if [ -f /run/v2ray_reload.flag ]; then \
          echo "[v2ray-reload] Flag found, restarting v2ray"; \
          systemctl restart v2ray; \
-         rm -f /run/v2api/v2ray_reload.flag; \
+         rm -f /run/v2ray_reload.flag; \
      else \
          echo "[v2ray-reload] No flag, nothing to do"; \
      fi'
@@ -729,7 +730,7 @@ server {
         proxy_set_header X-Forwarded-Proto \$scheme;
     }
 
-    # VMess WebSocket
+    # VMess WebSocket (проксируем на 127.0.0.1:10085)
     location /vmess {
         proxy_pass http://127.0.0.1:10085;
         proxy_http_version 1.1;
@@ -751,7 +752,7 @@ rm -f /etc/nginx/sites-enabled/default || true
 nginx -t
 systemctl reload nginx
 
-# SSL через Let’s Encrypt (вариант A)
+# Сертификат Let's Encrypt (вариант 1 — основной)
 certbot --nginx --non-interactive --agree-tos --register-unsafely-without-email -d "$DOMAIN" || true
 
 nginx -t
