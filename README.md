@@ -1,4 +1,5 @@
-<img width="1536" height="1024" alt="image" src="https://github.com/user-attachments/assets/64890a81-59bc-4f10-bca0-a776f81afdfd" />
+<img width="1009" height="303" alt="image" src="https://github.com/user-attachments/assets/470586de-8a19-4652-a438-5de9744e7420" />
+
 
 Минимальный и безопасный сервер Ubuntu/Debian за 5 минут
 
