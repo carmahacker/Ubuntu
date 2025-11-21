@@ -2,81 +2,123 @@
 
 Минимальный и безопасный сервер Ubuntu/Debian за 5 минут
 
-Оптимизирован для дешёвых VPS, OpenVZ и LXC-контейнеров, где нет UFW, а iptables работает только через venet-интерфейс.
+Позволяет динамически управлять V2Ray клиентами (VMess) через API:
+создание, включение/выключение, удаление и автоматическое обновление конфига V2Ray.
 
+Весь разворот происходит одной командой.
+Подходит для VPS / Bare Metal установок.
 
-# Установка
-```bash
-cd /root
-apt update -y
-apt install -y wget
+📦 Возможности
 
-wget https://github.com/carmahacker/Ubuntu/raw/main/v2api-install-v3.tar.gz -O v2api-install-v3.tar.gz
-tar -xzf v2api-install-v3.tar.gz
+🟦 V2Ray (VMess + WebSocket + TLS)
+🟩 Flask API управления клиентами
+🟧 PostgreSQL база для хранения клиентов
+🟥 Nginx reverse-proxy + Let's Encrypt SSL
+🔁 Авто-перезагрузка V2Ray при изменении config.json
+🔑 Автогенерация API Token
+👤 Обособленный системный пользователь v2api
+🛠 Полностью автономный инсталлятор
+
+🚀 Установка
+1. Скачайте архив
+wget https://raw.githubusercontent.com/carmahacker/Ubuntu/main/v2api-install-v3.tar.gz -O v2api.tar.gz
+
+2. Распакуйте
+tar -xzf v2api.tar.gz
 cd v2api-panel
 
-chmod +x install.sh
-./install.sh
-```
-# Где найти API-token
+3. Запустите установку
+bash install.sh
 
-После установки:
-```bash
-cat /opt/v2api/api_token
-```
-# Быстрые команды проверки API
 
-Сначала считаем токен в переменную:
-```bash
+Установка спросит домен:
+
+Введите доменное имя (например: v2.example.com): vp3.mt-2.ru
+
+
+После установки будут выданы:
+
+🌐 API URL
+
+🔑 API Token
+
+🔌 V2Ray VMess WebSocket endpoint
+
+📁 Путь к конфигам
+
+🧪 Проверка API через curl
+0. Загрузить токен в переменную:
 TOKEN=$(cat /opt/v2api/api_token)
-DOMAIN="your-domain.com"
-```
+echo $TOKEN
 
-Проверяем:
-```bash
-# Получить список клиентов
-curl -s https://$DOMAIN/api/clients \
+1. Получить список клиентов
+curl -s https://YOUR_DOMAIN/api/clients \
   -H "Authorization: Bearer $TOKEN"
-```
 
-# Добавить клиента
-```bash
-curl -s -X POST https://$DOMAIN/api/clients \
+2. Создать клиента
+curl -s -X POST https://YOUR_DOMAIN/api/clients \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"name":"test_user"}'
-```
+  -d '{"name":"alice"}'
+
 
 Ответ:
-{"name":"test_user","uuid":"xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"}
 
-# Отключить клиента
-```bash
-curl -s -X PUT https://$DOMAIN/api/clients/ID \
+{
+  "name": "alice",
+  "uuid": "dc2b577f-2e5f-40d0-8511-875a1cc2b9b6"
+}
+
+3. Отключить клиента
+curl -s -X PUT https://YOUR_DOMAIN/api/clients/1 \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"status": false}'
-```
 
-# Удалить клиента
-```bash
-curl -s -X DELETE https://$DOMAIN/api/clients/ID \
+4. Удалить клиента
+curl -s -X DELETE https://YOUR_DOMAIN/api/clients/1 \
   -H "Authorization: Bearer $TOKEN"
-```
 
-# Конфигурация VMess
+📂 Структура репозитория
+v2api-panel/
+├── app.py
+├── install.sh
+├── requirements.txt
+├── sql/
+│   └── init.sql
+├── nginx/
+│   └── v2api.conf.template
+├── systemd/
+│   ├── myapi.service
+│   ├── v2ray-reload.path
+│   └── v2ray-reload.service
+└── uninstall.sh
 
-После добавления клиента API автоматически обновляет:
-/usr/local/etc/v2ray/config.json
+📜 Что делает инсталлятор
 
-WebSocket endpoint:
-wss://YOUR_DOMAIN/vmess
+✔️ Устанавливает Python3 + venv
+✔️ Устанавливает PostgreSQL
+✔️ Создаёт БД v2ray_db и пользователя v2ray_user
+✔️ Устанавливает V2Ray (последний release)
+✔️ Разворачивает API в /opt/v2api
+✔️ Настраивает systemd услуги
+✔️ Устанавливает Nginx + Certbot SSL
+✔️ Настраивает WebSocket + TLS + Proxy на API
+✔️ Создаёт автоперезапуск V2Ray при изменении конфига
 
-# Путь установки
+❌ Удаление
+cd v2api-panel
+bash uninstall.sh
 
-Файл / каталог	Назначение
-/opt/v2api/app.py	Flask API
-/opt/v2api/api_token	API-токен
-/usr/local/etc/v2ray/config.json	V2Ray config
-/etc/systemd/system/myapi.service	Gunicorn API service
-/etc/nginx/sites-enabled/v2api.conf	Nginx reverse proxy
+
+Удаляет:
+
+systemd-службы
+
+Nginx конфиг
+
+PostgreSQL базу
+
+/opt/v2api
+
+Логи и темп-файлы
