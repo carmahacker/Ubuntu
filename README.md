@@ -21,17 +21,74 @@ cd v2api-panel
 chmod +x install.sh
 ./install.sh
 ```
-# Что делает установщик
+# Что делает инсталлятор
 
-спрашивает доменное имя
-ставит:
-V2Ray (последняя версия)
-PostgreSQL + база v2ray_db
-Flask API (Gunicorn + systemd)
-Nginx как reverse-proxy
-выпускает SSL-сертификат Let's Encrypt
-настраивает:
-/api → Flask (127.0.0.1:8081)
-/vmess → V2Ray WebSocket (127.0.0.1:10085)
-создаёт API token в /opt/v2api/api_token
-включает авто-обновление конфига V2Ray при изменении клиентов
+V2Ray	WebSocket → /vmess, порт 10085, работает через Nginx
+Nginx	/api → 127.0.0.1:8081 + /vmess → 127.0.0.1:10085
+SSL	Автоматический zCertbot, Let’s Encrypt
+PostgreSQL	База: v2ray_db, таблица: clients, пользователь: v2ray_user
+Flask API	Gunicorn + systemd на 127.0.0.1:8081
+Авто reload V2Ray	Через systemd.path при изменении config.json
+
+# Где найти API-token
+
+После установки:
+```bash
+cat /opt/v2api/api_token
+```
+# Быстрые команды проверки API
+
+Сначала считаем токен в переменную:
+```bash
+TOKEN=$(cat /opt/v2api/api_token)
+DOMAIN="your-domain.com"
+```
+
+Проверяем:
+```bash
+# Получить список клиентов
+curl -s https://$DOMAIN/api/clients \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+# Добавить клиента
+```bash
+curl -s -X POST https://$DOMAIN/api/clients \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"test_user"}'
+```
+
+Ответ:
+{"name":"test_user","uuid":"xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"}
+
+# Отключить клиента
+```bash
+curl -s -X PUT https://$DOMAIN/api/clients/ID \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"status": false}'
+```
+
+# Удалить клиента
+```bash
+curl -s -X DELETE https://$DOMAIN/api/clients/ID \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+# Конфигурация VMess
+
+После добавления клиента API автоматически обновляет:
+/usr/local/etc/v2ray/config.json
+
+WebSocket endpoint:
+wss://YOUR_DOMAIN/vmess
+
+# Путь установки
+
+Файл / каталог	Назначение
+/opt/v2api/app.py	Flask API
+/opt/v2api/api_token	API-токен
+/usr/local/etc/v2ray/config.json	V2Ray config
+/etc/systemd/system/myapi.service	Gunicorn API service
+/etc/nginx/sites-enabled/v2api.conf	Nginx reverse proxy
